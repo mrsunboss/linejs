@@ -1,12 +1,14 @@
 // For Talk (talk, group(chat), etc)
-
+import { default as Int64 } from "node-int64";
 import type { NestedArray, ProtocolKey } from "../../libs/thrift/declares.ts";
 import type * as LINETypes from "@evex/linejs-types";
 import type { LooseType } from "../../entities/common.ts";
 import { ChannelClient } from "./channel-client.ts";
 import type { Buffer } from "node:buffer";
+import { InternalError } from "../../entities/errors.ts";
 
 export class TalkClient extends ChannelClient {
+	public useTalkCache: boolean = false;
 	public TalkService_API_PATH = "/S4";
 	public TalkService_PROTOCOL_TYPE: ProtocolKey = 4;
 
@@ -19,39 +21,45 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Get line events.
 	 */
-	public async sync(
+	override sync(
 		options: {
 			limit?: number;
 			revision?: number;
 			globalRev?: number;
 			individualRev?: number;
+			timeout?: number;
 		} = {},
 	): Promise<LINETypes.SyncResponse> {
-		const { limit, revision, individualRev, globalRev } = {
+		const { limit, revision, individualRev, globalRev, timeout } = {
 			limit: 100,
 			revision: 0,
 			globalRev: 0,
 			individualRev: 0,
+			timeout: this.longTimeOutMs,
 			...options,
 		};
-		return await this.request(
-			[
-				[10, 1, revision],
-				[8, 2, limit],
-				[10, 3, globalRev],
-				[10, 4, individualRev],
-			],
-			"sync",
-			this.SyncService_PROTOCOL_TYPE,
-			"SyncResponse",
-			this.SyncService_API_PATH,
-		);
+		return new Promise<LINETypes.SyncResponse>((resolve) => {
+			this.request(
+				[
+					[10, 1, revision],
+					[8, 2, limit],
+					[10, 3, globalRev],
+					[10, 4, individualRev],
+				],
+				"sync",
+				this.SyncService_PROTOCOL_TYPE,
+				"SyncResponse",
+				this.SyncService_API_PATH,
+				{},
+				timeout,
+			).then((res) => resolve(res));
+		});
 	}
 
 	/**
 	 * @description Send message to talk.
 	 */
-	public async sendMessage(options: {
+	override async sendMessage(options: {
 		to: string;
 		text?: string;
 		contentType?: number;
@@ -98,7 +106,7 @@ export class TalkClient extends ChannelClient {
 				e2ee,
 				chunk,
 			};
-			return await this.sendMessage(options);
+			return this.sendMessage(options);
 		}
 
 		const message: NestedArray = [
@@ -137,7 +145,7 @@ export class TalkClient extends ChannelClient {
 			message.push([8, 24, 1]);
 		}
 		try {
-			return await this.direct_request(
+			return this.direct_request(
 				[
 					[8, 1, this.getReqseq()],
 					[12, 2, message],
@@ -148,9 +156,13 @@ export class TalkClient extends ChannelClient {
 				this.TalkService_API_PATH,
 			);
 		} catch (error) {
-			if ((error.data?.code as string).includes("E2EE") && !e2ee) {
+			if (
+				error instanceof InternalError &&
+				(error.data?.code as string).includes("E2EE") &&
+				!e2ee
+			) {
 				options.e2ee = true;
-				return await this.sendMessage(options);
+				return this.sendMessage(options);
 			} else {
 				throw error;
 			}
@@ -160,13 +172,13 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Unsend message.
 	 */
-	public async unsendMessage(options: {
+	public unsendMessage(options: {
 		messageId: string;
 	}): Promise<LINETypes.UnsendMessageResponse> {
 		const { messageId } = {
 			...options,
 		};
-		return await this.direct_request(
+		return this.direct_request(
 			[
 				[
 					12,
@@ -187,14 +199,14 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description React to the message.
 	 */
-	public async reactToMessage(options: {
+	override reactToMessage(options: {
 		messageId: string;
-		reactionType: LINETypes.MessageReactionType;
+		reactionType: LINETypes.MessageReactionType & number;
 	}): Promise<LINETypes.ReactToMessageResponse> {
 		const { messageId, reactionType } = {
 			...options,
 		};
-		return await this.direct_request(
+		return this.direct_request(
 			[
 				[
 					[
@@ -234,11 +246,11 @@ export class TalkClient extends ChannelClient {
 		).map((e: LooseType) => this.parser.rename_thrift("E2EEPublicKey", e));
 	}
 
-	public async negotiateE2EEPublicKey(options: {
+	public negotiateE2EEPublicKey(options: {
 		mid: string;
 	}): Promise<LINETypes.E2EENegotiationResult> {
 		const { mid } = { ...options };
-		return await this.direct_request(
+		return this.direct_request(
 			[[11, 2, mid]],
 			"negotiateE2EEPublicKey",
 			this.TalkService_PROTOCOL_TYPE,
@@ -247,12 +259,12 @@ export class TalkClient extends ChannelClient {
 		);
 	}
 
-	public async getLastE2EEGroupSharedKey(options: {
+	public getLastE2EEGroupSharedKey(options: {
 		keyVersion: number;
 		chatMid: string;
 	}): Promise<LINETypes.E2EEGroupSharedKey> {
 		const { keyVersion, chatMid } = { ...options };
-		return await this.direct_request(
+		return this.direct_request(
 			[
 				[8, 2, keyVersion],
 				[11, 3, chatMid],
@@ -267,12 +279,12 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Mark as read.
 	 */
-	public async sendChatChecked(options: {
+	public sendChatChecked(options: {
 		chatMid: string;
 		lastMessageId: string;
 	}): Promise<void> {
 		const { lastMessageId, chatMid } = { ...options };
-		return await this.direct_request(
+		return this.direct_request(
 			[
 				[8, 1, this.getReqseq()],
 				[11, 2, chatMid],
@@ -324,7 +336,7 @@ export class TalkClient extends ChannelClient {
 	public async getPreviousMessagesV2WithRequest(options: {
 		mid: string;
 		time: number;
-		id: number;
+		id: number | bigint | string;
 		count?: number;
 		withReadCount?: boolean;
 		receivedOnly?: boolean;
@@ -335,6 +347,9 @@ export class TalkClient extends ChannelClient {
 			receivedOnly: false,
 			...options,
 		};
+		const id64 = new Int64(
+			(typeof id === "string" ? BigInt(id) : id).toString(16),
+		);
 		return (
 			await this.direct_request(
 				[
@@ -348,7 +363,7 @@ export class TalkClient extends ChannelClient {
 								2,
 								[
 									[10, 1, time],
-									[10, 1, id],
+									[10, 2, id64],
 								],
 							],
 							[8, 3, count],
@@ -356,7 +371,7 @@ export class TalkClient extends ChannelClient {
 							[2, 5, receivedOnly],
 						],
 					],
-					[8, 3, 4],
+					[8, 3, 1],
 				],
 				"getPreviousMessagesV2WithRequest",
 				this.TalkService_PROTOCOL_TYPE,
@@ -391,11 +406,11 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Get user information from mid.
 	 */
-	public async getContact(
+	override async getContact(
 		options: {
 			mid: string;
 		},
-		useCache: boolean = false,
+		useCache: boolean = this.useTalkCache,
 	): Promise<LINETypes.Contact> {
 		if (useCache && this.cache.getCache("getContact", options)) {
 			return this.cache.getCache("getContact", options) as LINETypes.Contact;
@@ -419,7 +434,7 @@ export class TalkClient extends ChannelClient {
 		options: {
 			mids: string[];
 		},
-		useCache: boolean = false,
+		useCache: boolean = this.useTalkCache,
 	): Promise<LINETypes.Contact[]> {
 		const { mids } = { ...options };
 		const response = (
@@ -433,10 +448,11 @@ export class TalkClient extends ChannelClient {
 		).map((e: LooseType) =>
 			this.parser.rename_thrift("Contact", e),
 		) as LINETypes.Contact[];
-		if (useCache)
+		if (useCache) {
 			response.forEach((e) => {
 				this.cache.setCache("getContact", { mid: e.mid }, e);
 			});
+		}
 		return response;
 	}
 
@@ -444,9 +460,20 @@ export class TalkClient extends ChannelClient {
 		options: {
 			mids: string[];
 		},
-		useCache: boolean = false,
+		useCache: boolean = this.useTalkCache,
 	): Promise<LINETypes.GetContactsV2Response> {
 		const { mids } = { ...options };
+		if (
+			useCache &&
+			mids.length === 1 &&
+			this.cache.getCache("getContactV2", { mid: mids[0] })
+		) {
+			const res: { contacts: Record<string, LooseType> } = { contacts: {} };
+			res.contacts[mids[0]] = this.cache.getCache("getContactV2", {
+				mid: mids[0],
+			});
+			return res;
+		}
 		const response = (await this.request(
 			[[15, 1, [11, mids]]],
 			"getContactsV2",
@@ -455,13 +482,23 @@ export class TalkClient extends ChannelClient {
 			this.TalkService_API_PATH,
 		)) as LINETypes.GetContactsV2Response;
 
-		if (useCache)
+		if (useCache) {
 			for (const key in response.contacts) {
 				if (Object.prototype.hasOwnProperty.call(response.contacts, key)) {
-					const contact = response.contacts[key].contact;
-					this.cache.setCache("getContact", { mid: contact.mid }, contact);
+					const contact = response.contacts[key];
+					this.cache.setCache(
+						"getContact",
+						{ mid: contact.contact.mid },
+						contact.contact,
+					);
+					this.cache.setCache(
+						"getContactV2",
+						{ mid: contact.contact.mid },
+						contact,
+					);
 				}
 			}
+		}
 		return response;
 	}
 
@@ -474,7 +511,7 @@ export class TalkClient extends ChannelClient {
 			withMembers?: boolean;
 			withInvitees?: boolean;
 		},
-		useCache: boolean = false,
+		useCache: boolean = this.useTalkCache,
 	): Promise<LINETypes.Chat> {
 		if (useCache && this.cache.getCache("getChat", options)) {
 			return this.cache.getCache("getChat", options) as LINETypes.Chat;
@@ -495,23 +532,24 @@ export class TalkClient extends ChannelClient {
 			"GetChatsResponse",
 			this.TalkService_API_PATH,
 		)) as LINETypes.GetChatsResponse;
-		if (useCache)
-			response.chats.forEach((chat) => {
+		if (useCache) {
+			response.chats.forEach((chat: LINETypes.Chat) => {
 				this.cache.setCache("getChat", options, chat);
 			});
+		}
 		return response.chats[0];
 	}
 
 	/**
 	 * @description Get chats information from gids.
 	 */
-	public async getChats(
+	override async getChats(
 		options: {
 			gids: string[];
 			withMembers?: boolean;
 			withInvitees?: boolean;
 		},
-		useCache: boolean = false,
+		useCache: boolean = this.useTalkCache,
 	): Promise<LINETypes.GetChatsResponse> {
 		const { gids, withInvitees, withMembers } = {
 			withInvitees: true,
@@ -529,21 +567,22 @@ export class TalkClient extends ChannelClient {
 			"GetChatsResponse",
 			this.TalkService_API_PATH,
 		)) as LINETypes.GetChatsResponse;
-		if (useCache)
-			response.chats.forEach((chat) => {
+		if (useCache) {
+			response.chats.forEach((chat: LINETypes.Chat) => {
 				this.cache.setCache(
 					"getChat",
 					{ gid: chat.chatMid, withMembers, withInvitees },
 					chat,
 				);
 			});
+		}
 		return response;
 	}
 
 	/**
 	 * @description Get information on all the chats joined.
 	 */
-	public async getAllChatMids(
+	public getAllChatMids(
 		options: {
 			withMembers?: boolean;
 			withInvitees?: boolean;
@@ -554,7 +593,7 @@ export class TalkClient extends ChannelClient {
 			withMembers: true,
 			...options,
 		};
-		return await this.direct_request(
+		return this.direct_request(
 			[
 				[
 					12,
@@ -574,16 +613,29 @@ export class TalkClient extends ChannelClient {
 	}
 
 	/**
+	 * @description Get information on all friend.
+	 */
+	public getAllContactIds(): Promise<string[]> {
+		return this.direct_request(
+			[],
+			"getAllContactIds",
+			this.TalkService_PROTOCOL_TYPE,
+			false,
+			this.TalkService_API_PATH,
+		);
+	}
+
+	/**
 	 * @description Kick out members of the chat.
 	 */
-	public async deleteOtherFromChat(options: {
+	public deleteOtherFromChat(options: {
 		to: string;
 		mid: string;
 	}): Promise<LINETypes.DeleteOtherFromChatResponse> {
 		const { to, mid } = {
 			...options,
 		};
-		return await this.direct_request(
+		return this.request(
 			[
 				[8, 1, this.getReqseq()],
 				[11, 2, to],
@@ -599,13 +651,13 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Leave the chat.
 	 */
-	public async deleteSelfFromChat(options: {
+	public deleteSelfFromChat(options: {
 		to: string;
 	}): Promise<LINETypes.DeleteSelfFromChatResponse> {
 		const { to } = {
 			...options,
 		};
-		return await this.request(
+		return this.request(
 			[
 				[8, 1, this.getReqseq()],
 				[11, 2, to],
@@ -620,24 +672,18 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Invite mids into the chat.
 	 */
-	public async inviteIntoChat(options: {
+	public inviteIntoChat(options: {
 		to: string;
 		mids: string[];
 	}): Promise<LINETypes.InviteIntoChatResponse> {
 		const { to, mids } = {
 			...options,
 		};
-		return await this.request(
+		return this.request(
 			[
-				[
-					12,
-					1,
-					[
-						[8, 1, this.getReqseq()],
-						[11, 2, to],
-						[14, 3, [[11, mids]]],
-					],
-				],
+				[8, 1, this.getReqseq()],
+				[11, 2, to],
+				[14, 3, [11, mids]],
 			],
 			"inviteIntoChat",
 			this.TalkService_PROTOCOL_TYPE,
@@ -649,13 +695,13 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Accept the chat invitation and join.
 	 */
-	public async acceptChatInvitation(options: {
+	public acceptChatInvitation(options: {
 		to: string;
 	}): Promise<LINETypes.AcceptChatInvitationResponse> {
 		const { to } = {
 			...options,
 		};
-		return await this.request(
+		return this.request(
 			[
 				[8, 1, this.getReqseq()],
 				[11, 2, to],
@@ -670,13 +716,13 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Issue a ticket to join the chat.
 	 */
-	public async reissueChatTicket(options: {
+	public reissueChatTicket(options: {
 		groupMid: string;
 	}): Promise<LINETypes.ReissueChatTicketResponse> {
 		const { groupMid } = {
 			...options,
 		};
-		return await this.request(
+		return this.request(
 			[
 				[8, 1, this.getReqseq()],
 				[11, 2, groupMid],
@@ -691,13 +737,13 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Find the chat from the ticket.
 	 */
-	public async findChatByTicket(options: {
+	public findChatByTicket(options: {
 		ticketId: string;
 	}): Promise<LINETypes.FindChatByTicketResponse> {
 		const { ticketId } = {
 			...options,
 		};
-		return await this.request(
+		return this.request(
 			[[11, 1, ticketId]],
 			"findChatByTicket",
 			this.TalkService_PROTOCOL_TYPE,
@@ -709,14 +755,14 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Join the chat using the ticket.
 	 */
-	public async acceptChatInvitationByTicket(options: {
+	public acceptChatInvitationByTicket(options: {
 		to: string;
 		ticket: string;
 	}): Promise<LINETypes.AcceptChatInvitationByTicketResponse> {
 		const { to, ticket } = {
 			...options,
 		};
-		return await this.request(
+		return this.request(
 			[
 				[8, 1, this.getReqseq()],
 				[11, 2, to],
@@ -732,16 +778,16 @@ export class TalkClient extends ChannelClient {
 	/**
 	 * @description Update the information for the specified chat.
 	 */
-	public async updateChat(options: {
+	public updateChat(options: {
 		chatMid: string;
 		chatSet: Partial<LINETypes.Chat>;
-		updatedAttribute: LINETypes.ChatAttribute;
+		updatedAttribute: LINETypes.ChatAttribute & number;
 	}): Promise<LINETypes.UpdateChatResponse> {
 		const { chatMid, chatSet, updatedAttribute } = {
 			...options,
 		};
 
-		return await this.request(
+		return this.request(
 			[
 				[8, 1, this.getReqseq()],
 				[
@@ -783,7 +829,7 @@ export class TalkClient extends ChannelClient {
 		);
 	}
 
-	public async createChatRoomAnnouncement(options: {
+	public createChatRoomAnnouncement(options: {
 		chatRoomMid: string;
 		text: string;
 		link?: string;
@@ -798,7 +844,7 @@ export class TalkClient extends ChannelClient {
 			displayFields: 5,
 			...options,
 		};
-		return await this.direct_request(
+		return this.direct_request(
 			[
 				[8, 1, this.getReqseq()],
 				[11, 2, chatRoomMid],
@@ -817,6 +863,52 @@ export class TalkClient extends ChannelClient {
 			"createChatRoomAnnouncement",
 			this.TalkService_PROTOCOL_TYPE,
 			"ChatRoomAnnouncement",
+			this.TalkService_API_PATH,
+		);
+	}
+
+	public async getLastE2EEPublicKeys(options: { chatMid: string }): Promise<
+		Record<string, LINETypes.E2EEPublicKey>
+	> {
+		const { chatMid } = { ...options };
+		const _res = await this.direct_request(
+			[[11, 2, chatMid]],
+			"getLastE2EEPublicKeys",
+			this.TalkService_PROTOCOL_TYPE,
+			false,
+			this.TalkService_API_PATH,
+		);
+		const res: Record<string, LINETypes.E2EEPublicKey> = {};
+		for (const key in _res) {
+			if (Object.prototype.hasOwnProperty.call(_res, key)) {
+				const val = _res[key];
+				res[key] = this.parser.rename_thrift("E2EEPublicKey", val);
+			}
+		}
+		return res;
+	}
+
+	public registerE2EEGroupKey(options: {
+		keyVersion: number;
+		chatMid: string;
+		members: string[];
+		keyIds: number[];
+		encryptedSharedKeys: Buffer[];
+	}): Promise<LINETypes.E2EEGroupSharedKey> {
+		const { keyVersion, chatMid, members, keyIds, encryptedSharedKeys } = {
+			...options,
+		};
+		return this.direct_request(
+			[
+				[8, 2, keyVersion],
+				[11, 3, chatMid],
+				[15, 4, [11, members]],
+				[15, 5, [8, keyIds]],
+				[15, 6, [11, encryptedSharedKeys]],
+			],
+			"registerE2EEGroupKey",
+			this.TalkService_PROTOCOL_TYPE,
+			"E2EEGroupSharedKey",
 			this.TalkService_API_PATH,
 		);
 	}

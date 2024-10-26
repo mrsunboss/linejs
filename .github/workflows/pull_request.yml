@@ -1,13 +1,13 @@
 name: pull_request
 on:
   pull_request:
-    branches: ['*']
+    branches: ["*"]
     paths-ignore:
-      - 'docs/**'
-      - '.vscode/**'
-      - 'README.md'
-      - '.gitignore'
-      - 'LICENSE'
+      - "docs/**"
+      - ".vscode/**"
+      - "README.md"
+      - ".gitignore"
+      - "LICENSE"
 
 jobs:
   jsr-dry-run:
@@ -17,28 +17,28 @@ jobs:
       - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v1
         with:
-          deno-version: v1.x
+          deno-version: v2.x
       - run: deno publish --dry-run
         working-directory: ./packages/linejs
       - run: deno publish --dry-run
         working-directory: ./packages/types
 
   deno:
-    name: 'Deno'
+    name: "Testing"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v1
         with:
-          deno-version: v1.x
+          deno-version: v2.x
       - run: deno test
 
   format:
-    name: 'Format Check'
+    name: "Format Check"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v1
         with:
-          deno-version: v1.x
+          deno-version: v2.x
       - run: deno task format:check

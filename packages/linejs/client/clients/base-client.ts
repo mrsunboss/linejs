@@ -10,7 +10,7 @@ import {
 	type ProtocolKey,
 	Protocols,
 } from "../libs/thrift/declares.ts";
-import type * as LINETypes from "@evex/linejs-types";
+import * as LINETypes from "@evex/linejs-types";
 import ThriftRenameParser from "../libs/thrift/parser.ts";
 import { readThrift } from "../libs/thrift/read.ts";
 import { Thrift } from "@evex/linejs-types/thrift";
@@ -40,6 +40,7 @@ import { LINE_OBS } from "../../utils/obs/index.ts";
 import { RateLimitter } from "../libs/rate-limitter/index.ts";
 import type { FetchLike } from "../entities/fetch.ts";
 import { MimeType } from "../entities/mime.ts";
+import * as LINEClass from "../entities/class.ts";
 
 interface ClientOptions {
 	storage?: BaseStorage;
@@ -102,10 +103,13 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	 */
 	public LINE_OBS: LINE_OBS;
 
+	/**
+	 * @description the cache manager of client
+	 */
 	public cache: CacheManager;
 
 	/**
-	 * @description THe information of user
+	 * @description The information of user
 	 */
 	public user: LINETypes.Profile | undefined;
 	/**
@@ -116,6 +120,16 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	 * @description The information of metadata
 	 */
 	public metadata: Metadata | undefined;
+
+	/**
+	 * @description The timeout of fetch
+	 */
+	public timeOutMs: number = 20000;
+
+	/**
+	 * @description The timeout of long polling fetch
+	 */
+	public longTimeOutMs: number = 180000; // 3分間待ってやる
 
 	/**
 	 * @description Emit log event
@@ -243,7 +257,11 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 			return;
 		}
 
-		let myEventsSyncToken = noopMyEvents.syncToken;
+		const myEventsArg = {
+			subscriptionId: noopMyEvents.subscription?.subscriptionId as number,
+			syncToken: noopMyEvents.syncToken,
+			continuationToken: noopMyEvents.continuationToken,
+		};
 		let previousMessageId: string | undefined = undefined;
 
 		while (true) {
@@ -252,17 +270,20 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 				return;
 			}
 
-			const myEvents = await this.fetchMyEvents({
-				syncToken: myEventsSyncToken,
-			});
+			const myEvents = await this.fetchMyEvents(myEventsArg);
 
-			if (myEvents.syncToken !== myEventsSyncToken) {
+			if (myEvents.syncToken !== myEventsArg.syncToken) {
 				for (const event of myEvents.events) {
 					this.emit("square:event", event);
 
-					if (event.type === "NOTIFICATION_MESSAGE") {
-						const message =
-							event.payload.notificationMessage.squareMessage.message;
+					if (event.type === LINETypes.SquareEventType._NOTIFICATION_MESSAGE) {
+						const payload = event.payload.notificationMessage;
+
+						if (!payload) {
+							continue;
+						}
+
+						const message = payload.squareMessage.message;
 
 						if (previousMessageId === message.id) {
 							continue;
@@ -270,12 +291,12 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 
 						previousMessageId = message.id;
 
-						const send = async (
+						const send = (
 							options: SquareMessageSendOptions,
 							safe: boolean = true,
 						) => {
 							if (typeof options === "string") {
-								return await this.sendSquareMessage(
+								return this.sendSquareMessage(
 									{
 										squareChatMid: message.to,
 										text: options,
@@ -284,7 +305,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 									safe,
 								);
 							} else {
-								return await this.sendSquareMessage(
+								return this.sendSquareMessage(
 									{
 										squareChatMid: message.to,
 										relatedMessageId: undefined,
@@ -295,12 +316,12 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 							}
 						};
 
-						const reply = async (
+						const reply = (
 							options: MessageReplyOptions,
 							safe: boolean = true,
 						) => {
 							if (typeof options === "string") {
-								return await this.sendSquareMessage(
+								return this.sendSquareMessage(
 									{
 										squareChatMid: message.to,
 										text: options,
@@ -309,7 +330,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 									safe,
 								);
 							} else {
-								return await this.sendSquareMessage(
+								return this.sendSquareMessage(
 									{
 										squareChatMid: message.to,
 										relatedMessageId: message.id,
@@ -320,18 +341,16 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 							}
 						};
 
-						const react = async (options: SquareMessageReactionOptions) => {
+						const react = (options: SquareMessageReactionOptions) => {
 							if (typeof options === "number") {
-								return await this.reactToSquareMessage({
-									squareChatMid:
-										event.payload.notificationMessage.squareChatMid,
+								return this.reactToSquareMessage({
+									squareChatMid: payload.squareChatMid,
 									reactionType: options as LINETypes.MessageReactionType,
 									squareMessageId: message.id,
 								});
 							} else {
-								return await this.reactToSquareMessage({
-									squareChatMid:
-										event.payload.notificationMessage.squareChatMid,
+								return this.reactToSquareMessage({
+									squareChatMid: payload.squareChatMid,
 									reactionType: (
 										options as Exclude<
 											SquareMessageReactionOptions,
@@ -353,7 +372,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 							});
 
 						this.emit("square:message", {
-							...event.payload.notificationMessage,
+							...payload,
 							type: "square",
 							content: typeof message.text === "string" ? message.text : "",
 							contentMetadata: message.contentMetadata,
@@ -367,7 +386,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 								mid: message._from,
 								get displayName() {
 									return (
-										event.payload.notificationMessage.senderDisplayName ||
+										payload.senderDisplayName ||
 										getMyProfile().then((myProfile) => myProfile.displayName)
 									);
 								},
@@ -384,8 +403,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 							getMyProfile,
 							square: async () =>
 								await this.getSquareChat({
-									squareChatMid:
-										event.payload.notificationMessage.squareChatMid,
+									squareChatMid: payload.squareChatMid,
 								}),
 							data:
 								this.hasData(message) &&
@@ -393,16 +411,91 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 									await this.getMessageObsData(message.id, preview)),
 							message,
 						});
+					} else if (
+						event.type ===
+						LINETypes.SquareEventType._NOTIFIED_UPDATE_SQUARE_CHAT_STATUS
+					) {
+						const payload = event.payload.notifiedUpdateSquareChatStatus;
+
+						if (!payload) {
+							continue;
+						}
+
+						this.emit("square:status", {
+							...payload,
+							...payload["statusWithoutMessage"],
+						});
 					}
 				}
-				myEventsSyncToken = myEvents.syncToken;
+				myEventsArg.syncToken = myEvents.syncToken;
+				myEventsArg.continuationToken = myEvents.continuationToken;
+				myEventsArg.subscriptionId = myEvents.subscription
+					?.subscriptionId as number;
 			}
 
-			await new Promise((resolve) => setTimeout(resolve));
+			await new Promise((resolve) => setTimeout(resolve, 1000));
 		}
 	}
 
-	public revision: number = 0;
+	public async pollingSquareEventsV2() {
+		if (this.IS_POLLING_SQUARE) {
+			return;
+		}
+
+		this.IS_POLLING_SQUARE = true;
+
+		let noopMyEvents: LINETypes.FetchMyEventsResponse | undefined;
+		try {
+			noopMyEvents = await this.fetchMyEvents();
+		} catch (_e) {
+			this.IS_POLLING_SQUARE = false;
+			return;
+		}
+
+		const myEventsArg = {
+			subscriptionId: noopMyEvents.subscription?.subscriptionId as number,
+			syncToken: noopMyEvents.syncToken,
+			continuationToken: noopMyEvents.continuationToken,
+		};
+
+		while (true) {
+			if (!this.metadata) {
+				this.IS_POLLING_SQUARE = false;
+				return;
+			}
+			if (!this.IS_POLLING_SQUARE) {
+				return;
+			}
+			const myEvents = await this.fetchMyEvents(myEventsArg);
+			if (myEvents.syncToken !== myEventsArg.syncToken) {
+				for (const event of myEvents.events) {
+					this.emit("v2_square_event", event);
+
+					if (
+						event.type === LINETypes.SquareEventType._NOTIFICATION_MESSAGE &&
+						event.payload.notificationMessage
+					) {
+						const squareEventNotificationMessage =
+							event.payload.notificationMessage;
+						this.emit(
+							"v2_square_message",
+							new LINEClass.SquareMessage(
+								{ squareEventNotificationMessage },
+								this as LooseType,
+							),
+						);
+					}
+				}
+				myEventsArg.syncToken = myEvents.syncToken;
+				myEventsArg.continuationToken = myEvents.continuationToken;
+				myEventsArg.subscriptionId = myEvents.subscription
+					?.subscriptionId as number;
+			}
+
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+		}
+	}
+	public ignoreSyncError: boolean = true;
 
 	public async pollingTalkEvents() {
 		if (this.IS_POLLING_TALK) {
@@ -412,7 +505,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		this.IS_POLLING_TALK = true;
 
 		const noopEvents = await this.sync();
-		let revision = this.revision || noopEvents.fullSyncResponse.nextRevision;
+		let revision = noopEvents.fullSyncResponse.nextRevision || 0;
 		let globalRev: number | undefined, individualRev: number | undefined;
 		while (true) {
 			if (!this.metadata) {
@@ -421,7 +514,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 			}
 			try {
 				const myEvents = await this.sync({
-					revision,
+					revision: revision as number,
 					globalRev,
 					individualRev,
 				});
@@ -429,16 +522,19 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 				for (const operation of myEvents.operationResponse?.operations) {
 					revision = operation.revision;
 					if (
-						operation.type === "RECEIVE_MESSAGE" ||
-						operation.type === "SEND_MESSAGE" ||
-						operation.type === "SEND_CONTENT"
+						operation.type === LINETypes.OpType._RECEIVE_MESSAGE ||
+						operation.type === LINETypes.OpType._SEND_MESSAGE ||
+						operation.type === LINETypes.OpType._SEND_CONTENT
 					) {
 						const message = await this.decryptE2EEMessage(operation.message);
-						if (this.hasData(message) && operation.type == "SEND_MESSAGE") {
+						if (
+							this.hasData(message) &&
+							operation.type == LINETypes.OpType._SEND_MESSAGE
+						) {
 							//continue;
 						}
 						let sendIn = "";
-						if (message.toType === "USER") {
+						if (message.toType === LINETypes.MIDType._USER) {
 							if (message._from === this.user?.mid) {
 								sendIn = message.to;
 							} else {
@@ -447,15 +543,15 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 						} else {
 							sendIn = message.to;
 						}
-						const send = async (options: SquareMessageSendOptions) => {
+						const send = (options: SquareMessageSendOptions) => {
 							if (typeof options === "string") {
-								return await this.sendMessage({
+								return this.sendMessage({
 									to: sendIn,
 									text: options,
 									relatedMessageId: undefined,
 								});
 							} else {
-								return await this.sendMessage({
+								return this.sendMessage({
 									to: sendIn,
 									relatedMessageId: undefined,
 									...options,
@@ -463,15 +559,15 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 							}
 						};
 
-						const reply = async (options: MessageReplyOptions) => {
+						const reply = (options: MessageReplyOptions) => {
 							if (typeof options === "string") {
-								return await this.sendMessage({
+								return this.sendMessage({
 									to: sendIn,
 									text: options,
 									relatedMessageId: message.id,
 								});
 							} else {
-								return await this.sendMessage({
+								return this.sendMessage({
 									to: sendIn,
 									relatedMessageId: message.id,
 									...options,
@@ -479,14 +575,14 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 							}
 						};
 
-						const react = async (options: SquareMessageReactionOptions) => {
+						const react = (options: SquareMessageReactionOptions) => {
 							if (typeof options === "number") {
-								return await this.reactToMessage({
+								return this.reactToMessage({
 									reactionType: options as LINETypes.MessageReactionType,
 									messageId: message.id,
 								});
 							} else {
-								return await this.reactToMessage({
+								return this.reactToMessage({
 									reactionType: (
 										options as Exclude<
 											SquareMessageReactionOptions,
@@ -499,30 +595,32 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 						};
 
 						const chat =
-							message.toType === "USER"
-								? async () => {
-										return await this.getContact({ mid: sendIn });
+							message.toType === LINETypes.MIDType._USER
+								? () => {
+										return this.getContact({ mid: sendIn });
 									}
 								: undefined;
 
 						const group =
-							message.toType !== "USER"
+							message.toType !== LINETypes.MIDType._USER
 								? async () => {
 										return (await this.getChats({ mids: [sendIn] })).chats[0];
 									}
 								: (undefined as LooseType);
 
-						const getContact = async () => {
-							return await this.getContact({ mid: message._from });
+						const getContact = () => {
+							return this.getContact({ mid: message._from });
 						};
 
-						const getMyProfile = async () => {
-							return await this.refreshProfile(true);
+						const getMyProfile = () => {
+							return this.refreshProfile(true);
 						};
 
 						this.emit("message", {
 							...operation,
-							type: (message.toType === "USER" ? "chat" : "group") as LooseType,
+							type: (message.toType === LINETypes.MIDType._USER
+								? "chat"
+								: "group") as LooseType,
 							opType: operation.type,
 							content: typeof message.text === "string" ? message.text : "",
 							contentMetadata: message.contentMetadata,
@@ -555,15 +653,83 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 					this.emit("event", operation);
 				}
 				globalRev =
-					myEvents.operationResponse?.globalEvents?.lastRevision || globalRev;
+					(myEvents.operationResponse?.globalEvents?.lastRevision as number) ||
+					globalRev;
 				individualRev =
-					myEvents.operationResponse?.individualEvents?.lastRevision ||
-					individualRev;
+					(myEvents.operationResponse?.individualEvents
+						?.lastRevision as number) || individualRev;
 				revision = myEvents.fullSyncResponse?.nextRevision || revision;
-			} catch {
-				/* Do Nothing */
+			} catch (e) {
+				if (!this.ignoreSyncError) {
+					throw e;
+				}
 			}
-			await new Promise((resolve) => setTimeout(resolve));
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+	}
+
+	public async pollingTalkEventsV2() {
+		if (this.IS_POLLING_TALK) {
+			return;
+		}
+
+		this.IS_POLLING_TALK = true;
+
+		const noopEvents = await this.sync();
+		let revision = noopEvents.fullSyncResponse.nextRevision || 0;
+		let globalRev: number | undefined, individualRev: number | undefined;
+		while (true) {
+			if (!this.metadata) {
+				this.IS_POLLING_TALK = false;
+				return;
+			}
+			if (!this.IS_POLLING_TALK) {
+				return;
+			}
+			try {
+				const myEvents = await this.sync({
+					revision: revision as number,
+					globalRev,
+					individualRev,
+				});
+
+				for (const operation of myEvents.operationResponse?.operations) {
+					revision = operation.revision;
+					this.emit(
+						"v2_event",
+						new LINEClass.Operation(operation, this as LooseType),
+					);
+					if (
+						operation.type === LINETypes.OpType._RECEIVE_MESSAGE ||
+						operation.type === LINETypes.OpType._SEND_MESSAGE ||
+						operation.type === LINETypes.OpType._SEND_CONTENT
+					) {
+						const message = await this.decryptE2EEMessage(operation.message);
+						if (
+							this.hasData(message) &&
+							operation.type == LINETypes.OpType._SEND_MESSAGE
+						) {
+							continue;
+						}
+						this.emit(
+							"v2_message",
+							new LINEClass.TalkMessage({ operation }, this as LooseType),
+						);
+					}
+				}
+				globalRev =
+					(myEvents.operationResponse?.globalEvents?.lastRevision as number) ||
+					globalRev;
+				individualRev =
+					(myEvents.operationResponse?.individualEvents
+						?.lastRevision as number) || individualRev;
+				revision = myEvents.fullSyncResponse?.nextRevision || revision;
+			} catch (e) {
+				if (!this.ignoreSyncError) {
+					throw e;
+				}
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
 	}
 
@@ -976,10 +1142,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 				Buffer.from(secret),
 				Buffer.from(e2eeInfo.metadata.encryptedKeyChain, "base64"),
 			);
-			const e2eeLogin = await this.confirmE2EELogin(
-				response[3],
-				deviceSecret,
-			);
+			const e2eeLogin = await this.confirmE2EELogin(response[3], deviceSecret);
 			response = await this.loginV2(
 				keynm,
 				encryptedMessage,
@@ -1091,8 +1254,8 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		return Buffer.from([]);
 	}
 
-	public async createSession(): Promise<string> {
-		return await this.direct_request(
+	public createSession(): Promise<string> {
+		return this.direct_request(
 			[],
 			"createSession",
 			4,
@@ -1101,8 +1264,8 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		);
 	}
 
-	public async createQrCode(qrcode: string): Promise<LooseType> {
-		return await this.request(
+	public createQrCode(qrcode: string): Promise<LooseType> {
+		return this.request(
 			[[11, 1, qrcode]],
 			"createQrCode",
 			4,
@@ -1123,6 +1286,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 					"x-lst": "150000",
 					"x-line-access": qrcode,
 				},
+				this.longTimeOutMs,
 			);
 			return true;
 		} catch (error) {
@@ -1130,11 +1294,11 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		}
 	}
 
-	public async verifyCertificate(
+	public verifyCertificate(
 		qrcode: string,
 		cert?: string | undefined,
 	): Promise<LooseType> {
-		return await this.request(
+		return this.request(
 			[
 				[11, 1, qrcode],
 				[11, 2, cert],
@@ -1146,8 +1310,8 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		);
 	}
 
-	public async createPinCode(qrcode: string): Promise<LooseType> {
-		return await this.request(
+	public createPinCode(qrcode: string): Promise<LooseType> {
+		return this.request(
 			[[11, 1, qrcode]],
 			"createPinCode",
 			4,
@@ -1168,6 +1332,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 					"x-lst": "150000",
 					"x-line-access": qrcode,
 				},
+				this.longTimeOutMs,
 			);
 			return true;
 		} catch (error) {
@@ -1175,11 +1340,11 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		}
 	}
 
-	public async qrCodeLogin(
+	public qrCodeLogin(
 		authSessionId: string,
 		autoLoginIsRequired: boolean = true,
 	): Promise<LooseType> {
-		return await this.request(
+		return this.request(
 			[
 				[11, 1, authSessionId],
 				[11, 2, this.system?.device],
@@ -1192,13 +1357,13 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		);
 	}
 
-	public async qrCodeLoginV2(
+	public qrCodeLoginV2(
 		authSessionId: string,
 		modelName: string = "evex",
 		systemName: string = "linejs",
 		autoLoginIsRequired: boolean = true,
 	): Promise<LooseType> {
-		return await this.request(
+		return this.request(
 			[
 				[11, 1, authSessionId],
 				[11, 2, systemName],
@@ -1212,11 +1377,11 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		);
 	}
 
-	public async confirmE2EELogin(
+	public confirmE2EELogin(
 		verifier: string,
 		deviceSecret: Buffer,
 	): Promise<LooseType> {
-		return await this.direct_request(
+		return this.direct_request(
 			[
 				[11, 1, verifier],
 				[11, 2, deviceSecret],
@@ -1227,7 +1392,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 			"/api/v3p/rs",
 		);
 	}
-	private async loginV2(
+	private loginV2(
 		keynm: string,
 		encryptedMessage: string,
 		deviceName: Device,
@@ -1241,7 +1406,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		if (verifier) {
 			loginType = 1;
 		}
-		return await this.direct_request(
+		return this.direct_request(
 			[
 				[
 					12,
@@ -1276,8 +1441,8 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	 * @returns {Promise<LINETypes.RSAKey>} RSA key info.
 	 * @throws {FetchError} If failed to fetch RSA key info.
 	 */
-	public async getRSAKeyInfo(provider: number = 0): Promise<LINETypes.RSAKey> {
-		return await this.request(
+	public getRSAKeyInfo(provider: number = 0): Promise<LINETypes.RSAKey> {
+		return this.request(
 			[[8, 2, provider]],
 			"getRSAKeyInfo",
 			3,
@@ -1295,6 +1460,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	 * @param {boolean | string} [parse=true] - Whether to parse the response.
 	 * @param {string} [path="/S3"] - The path of the request.
 	 * @param {object} [headers={}] - The headers of the request.
+	 * @param {number} [timeOutMs=this.timeOutMs] - The timeout milliseconds of the request.
 	 * @returns {Promise<LooseType>} The response.
 	 */
 	public async request(
@@ -1304,18 +1470,28 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		parse: boolean | string = true,
 		path: string = "/S3",
 		headers: Record<string, string | undefined> = {},
+		timeOutMs: number = this.timeOutMs,
 	): Promise<LooseType> {
-		return (
-			await this.rawRequest(
-				path,
-				[[12, 1, value]],
-				methodName,
-				protocolType,
-				headers,
-				undefined,
-				parse,
-			)
-		).value;
+		try {
+			return (
+				await this.rawRequest(
+					path,
+					[[12, 1, value]],
+					methodName,
+					protocolType,
+					headers,
+					undefined,
+					parse,
+					undefined,
+					timeOutMs,
+				)
+			).value;
+		} catch (error) {
+			if ((error as Error).message === "InputBufferUnderrunError") {
+				throw new InternalError("ServerError", "Incorrect buffer received");
+			}
+			throw error;
+		}
 	}
 
 	/**
@@ -1327,6 +1503,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	 * @param {boolean | string} [parse=true] - Whether to parse the response.
 	 * @param {string} [path="/S3"] - The path of the request.
 	 * @param {object} [headers={}] - The headers of the request.
+	 * @param {number} [timeOutMs=this.timeOutMs] - The timeout milliseconds of the request.
 	 * @returns {Promise<LooseType>} The response.
 	 */
 	public async direct_request(
@@ -1336,21 +1513,34 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		parse: boolean | string = true,
 		path: string = "/S3",
 		headers: Record<string, string | undefined> = {},
+		timeOutMs: number = this.timeOutMs,
 	): Promise<LooseType> {
-		return (
-			await this.rawRequest(
-				path,
-				value,
-				methodName,
-				protocolType,
-				headers,
-				undefined,
-				parse,
-			)
-		).value;
+		try {
+			return (
+				await this.rawRequest(
+					path,
+					value,
+					methodName,
+					protocolType,
+					headers,
+					undefined,
+					parse,
+					true,
+					timeOutMs,
+				)
+			).value;
+		} catch (error) {
+			if ((error as Error).message === "InputBufferUnderrunError") {
+				throw new InternalError("ServerError", "Incorrect buffer received");
+			}
+			throw error;
+		}
 	}
 
-	public EXCEPTION_TYPES = {
+	/**
+	 * @description The Types of Error
+	 */
+	public EXCEPTION_TYPES: Record<string, string | undefined> = {
 		"/S3": "TalkException",
 		"/S4": "TalkException",
 		"/SYNC4": "TalkException",
@@ -1361,7 +1551,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		"/LIFF1": "LiffException",
 		"/api/v3p/rs": "TalkException",
 		"/api/v3/TalkService.do": "TalkException",
-	} as Record<string, string | undefined>;
+	};
 
 	/**
 	 * @description Request to LINE API by raw.
@@ -1374,19 +1564,20 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	 * @param {string} [overrideMethod="POST"] - The method of the request.
 	 * @param {boolean | string} [parse=true] - Whether to parse the response.
 	 * @param {boolean} [isReRequest=false] - Is Re-Request.
+	 * @param {number} [timeOutMs=this.timeOutMs] - The timeout milliseconds of the request.
 	 * @returns {Promise<ParsedThrift>} The response.
-	 *
-	 * @throws {InternalError} If the request fails.
+	 * @throws {InternalError} If the request fails or timeout.
 	 */
 	public async rawRequest(
 		path: string,
 		value: NestedArray,
 		methodName: string,
 		protocolType: ProtocolKey,
-		appendHeaders = {},
-		overrideMethod = "POST",
+		appendHeaders: object = {},
+		overrideMethod: string = "POST",
 		parse: boolean | string = true,
 		isReRequest: boolean = false,
+		timeOutMs: number = this.timeOutMs,
 	): Promise<ParsedThrift> {
 		if (!this.system) {
 			throw new InternalError("Not setup yet", "Please call 'login()' first");
@@ -1397,27 +1588,32 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 
 		headers = { ...headers, ...appendHeaders };
 
-		this.log("request-write", {
+		this.log("writeThrift", {
 			thriftMethodName: methodName,
 			protocolType,
 			value,
 		});
 
 		const Trequest = writeThrift(value, methodName, Protocol);
-
-		this.log("request-send", {
+		const fetchArg: [string, RequestInit] = [
+			`https://${this.endpoint}${path}`,
+			{
+				method: overrideMethod,
+				headers,
+				signal: AbortSignal.timeout(timeOutMs),
+				body: Trequest,
+			},
+		];
+		this.log("fetch-send", {
 			method: "thrift",
 			thriftMethodName: methodName,
 			httpMethod: overrideMethod,
 			data: Trequest,
 			headers,
+			fetchArg,
 		});
 
-		const response = await this.customFetch(`https://${this.endpoint}${path}`, {
-			method: overrideMethod,
-			headers,
-			body: Trequest,
-		});
+		const response = await this.customFetch(...fetchArg);
 		const nextToken = response.headers.get("x-line-next-access");
 
 		if (nextToken) {
@@ -1429,7 +1625,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		}
 		const body = await response.arrayBuffer();
 		const parsedBody = new Uint8Array(body);
-		this.log("response-recv", {
+		this.log("fetch-recv", {
 			method: "thrift",
 			response,
 			data: parsedBody,
@@ -1449,12 +1645,14 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 			}
 		}
 
-		this.log("response-parse", {
+		this.log("readThrift", {
 			parsedData: res,
 		});
 
 		const isRefresh =
-			res.e && res.e["code"] === "NOT_AUTHORIZED_DEVICE" && nextToken;
+			res.e &&
+			res.e["code"] === "MUST_REFRESH_V3_TOKEN" &&
+			this.storage.get("refreshToken");
 
 		if (res.e && !isRefresh) {
 			throw new InternalError(
@@ -1465,7 +1663,9 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		}
 
 		if (isRefresh && !isReRequest) {
-			return await this.rawRequest(
+			this.log("V3_Refresh", res.e);
+			await this.tryRefreshToken();
+			return this.rawRequest(
 				path,
 				value,
 				methodName,
@@ -1488,7 +1688,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	 */
 	public getHeader(
 		lineAccessToken: string | undefined,
-		overrideMethod = "POST",
+		overrideMethod: string = "POST",
 	): Record<string, string> {
 		if (!this.system) {
 			throw new InternalError("Not setup yet", "Please call 'login()' first");
@@ -1557,12 +1757,9 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	/**
 	 * @description Gets the server time
 	 */
-	public async getServerTime(): Promise<number> {
-		return await this.request(
-			[
-				128, 1, 0, 1, 0, 0, 0, 13, 103, 101, 116, 83, 101, 114, 118, 101, 114,
-				84, 105, 109, 101, 0, 0, 0, 0, 0,
-			],
+	public getServerTime(): Promise<number> {
+		return this.direct_request(
+			[],
 			"getServerTime",
 			this.LINEService_PROTOCOL_TYPE,
 			false,
@@ -1573,8 +1770,8 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	/**
 	 * @description Gets the profile of the current user.
 	 */
-	public async getProfile(): Promise<LINETypes.Profile> {
-		return await this.request(
+	public getProfile(): Promise<LINETypes.Profile> {
+		return this.request(
 			[],
 			"getProfile",
 			this.LINEService_PROTOCOL_TYPE,
@@ -1691,7 +1888,8 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 			this.storage.set(
 				"expire",
 				(
-					RATR.tokenIssueTimeEpochSec + RATR.durationUntilRefreshInSec
+					(RATR.tokenIssueTimeEpochSec as number) +
+					(RATR.durationUntilRefreshInSec as number)
 				).toString(),
 			);
 		} else {
@@ -1702,10 +1900,10 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	/**
 	 * @description Refresh token.
 	 */
-	public async refreshAccessToken(
+	public refreshAccessToken(
 		refreshToken: string,
 	): Promise<LINETypes.RefreshAccessTokenResponse> {
-		return await this.request(
+		return this.request(
 			[[11, 1, refreshToken]],
 			"refresh",
 			4,
@@ -1719,13 +1917,14 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 	 */
 	public async getMessageObsData(
 		messageId: string,
-		isPreview = false,
+		isPreview: boolean = false,
+		isSquare: boolean = false,
 	): Promise<Blob> {
 		if (!this.metadata) {
 			throw new InternalError("Not setup yet", "Please call 'login()' first");
 		}
-		return await this.customFetch(
-			this.LINE_OBS.getDataUrl(messageId, isPreview),
+		const r = await this.customFetch(
+			this.LINE_OBS.getDataUrl(messageId, isPreview, isSquare),
 			{
 				headers: {
 					accept: "application/json, text/plain, */*",
@@ -1733,15 +1932,14 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 					"x-Line-access": this.metadata.authToken,
 				},
 			},
-		).then((r) => {
-			return r.blob();
-		});
+		);
+		return r.blob();
 	}
 
 	/**
 	 * @description Upload obs message to talk.
 	 */
-	public async uploadObjTalk(
+	public uploadObjTalk(
 		to: string,
 		type: "image" | "gif" | "video" | "audio" | "file",
 		data: Blob,
@@ -1767,7 +1965,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 			type,
 			tomid: to,
 			oid: "reqseq",
-			reqseq: (334).toString(),
+			reqseq: this.getReqseq("talk").toString(),
 		};
 		if (type === "image") {
 			param.cat = "original";
@@ -1779,7 +1977,7 @@ export class BaseClient extends TypedEventEmitter<ClientEvents> {
 		}
 		const toType: "talk" | "g2" =
 			to[0] === "m" || to[0] === "t" ? "g2" : "talk";
-		return await this.customFetch(
+		return this.customFetch(
 			this.LINE_OBS.prefix + "r/" + toType + "/m/reqseq",
 			{
 				headers: {

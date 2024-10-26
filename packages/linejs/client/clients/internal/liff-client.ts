@@ -1,9 +1,9 @@
 // For Liff (liff, etc)
-import { JSDOM } from "npm:jsdom@25.0.0";
 import type { NestedArray, ProtocolKey } from "../../libs/thrift/declares.ts";
 import type { LooseType } from "../../entities/common.ts";
 import { BaseClient } from "../base-client.ts";
 import type * as LINETypes from "@evex/linejs-types";
+import { InternalError } from "../../entities/errors.ts";
 
 export class LiffClient extends BaseClient {
 	protected static readonly LINE_LIFF_ENDPOINT =
@@ -55,7 +55,7 @@ export class LiffClient extends BaseClient {
 			}
 			context = [12, chaLINETypes, [chat]];
 		}
-		return await this.request(
+		return this.request(
 			[
 				[11, 1, liffId],
 				[12, 2, [context]],
@@ -90,25 +90,28 @@ export class LiffClient extends BaseClient {
 			});
 			return liff[3];
 		} catch (error) {
-			this.log("liff-error", { ...error.data });
-			if (error.data.code === 3 && tryConsent) {
-				const data: LINETypes.LiffException = error.data;
-				const payload = data.payload;
-				const consentRequired = payload.consentRequired;
-				const channelId = consentRequired.channelId;
-				const consentUrl = consentRequired.consentUrl;
-				const toType = chatMid && this.getToType(chatMid);
-				let hasConsent = false;
+			if (error instanceof InternalError) {
+				this.log("liff-error", { ...error.data });
+				if (error.data.code === 3 && tryConsent) {
+					const data: LINETypes.LiffException =
+						error.data as LINETypes.LiffException;
+					const payload = data.payload;
+					const consentRequired = payload.consentRequired;
+					const channelId = consentRequired.channelId;
+					const consentUrl = consentRequired.consentUrl;
+					const toType = chatMid && this.getToType(chatMid);
+					let hasConsent = false;
 
-				if (channelId && consentUrl) {
-					if (toType === 4 || this.system?.device === "DESKTOPWIN") {
-						hasConsent = await this.tryConsentAuthorize(consentUrl);
-					} else {
-						hasConsent = await this.tryConsentLiff(channelId);
-					}
-					if (hasConsent) {
-						options.tryConsent = false;
-						return this.getLiffToken(options);
+					if (channelId && consentUrl) {
+						if (toType === 4 || this.system?.device === "DESKTOPWIN") {
+							hasConsent = await this.tryConsentAuthorize(consentUrl);
+						} else {
+							hasConsent = await this.tryConsentLiff(channelId);
+						}
+						if (hasConsent) {
+							options.tryConsent = false;
+							return this.getLiffToken(options);
+						}
 					}
 				}
 			}
@@ -139,7 +142,10 @@ export class LiffClient extends BaseClient {
 			...options,
 		};
 		if (!this.liff_token_cache[to] || forceIssue) {
-			token = await this.getLiffToken({ chatMid: to, liffId: this.liffId });
+			token = await this.getLiffToken({
+				chatMid: to,
+				liffId: this.liffId,
+			});
 		} else {
 			token = this.liff_token_cache[to];
 		}
@@ -209,7 +215,13 @@ export class LiffClient extends BaseClient {
 		const response = await fetch(consentUrl, { method: "GET", headers });
 		if (response.ok) {
 			const text = await response.text();
-			const consentResponse = new JSDOM(text).dom.window.document;
+			const consentResponse =
+				"DOMParser" in window
+					? new (window as LooseType).DOMParser().parseFromString(
+							text,
+							"text/html",
+						)
+					: new (await import("jsdom"))(text).dom.window.document;
 			const channelId =
 				consentResponse
 					.querySelector('meta[name="channelId"]')
